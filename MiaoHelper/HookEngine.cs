@@ -13,7 +13,7 @@ public sealed class HookEngine : IDisposable
 {
     private const int MAX_SNAPSHOT_LEN = 500;
     private const long WRITE_ECHO_WINDOW_MS = 600;
-    private const int DEBOUNCE_FAST = 150;       // 检测到句末标点(。！？)后,快速检查
+    private const int DEBOUNCE_FAST = 200;       // 检测到句末标点(。！？)后,快速检查
     private const int DEBOUNCE_SLOW = 1200;      // 其他按键:长防抖兜底,平时不闪
 
     private readonly KeyboardHook _hook;
@@ -21,13 +21,13 @@ public sealed class HookEngine : IDisposable
     private CatConfig _config;
     private bool _isProcessing;
     private bool _enabled = true;
-    private bool _shiftHeld;
+    private bool _punctTrigger;   // 本次防抖是否由句末标点键触发
     private int _retryCount;
     private string _userOriginal = "";
     private string _lastSet = "";
     private long _lastWriteTime;
     private IntPtr _lastForeground = IntPtr.Zero;
-    private IntPtr _lastDumpHwnd = IntPtr.Zero;
+    private IntPtr _uiaOffHwnd = IntPtr.Zero; // 已知 UIA 读不到的窗口,直接走剪贴板
 
     /// <summary>调试日志(托盘写 debug.log)。</summary>
     public event Action<string>? Log;
@@ -42,7 +42,7 @@ public sealed class HookEngine : IDisposable
         {
             _debounce.Stop();
             bool retry = DoCheck();
-            if (retry && _retryCount < 1)
+            if (retry && _retryCount < 2)
             {
                 _retryCount++;
                 _debounce.Interval = 250;
@@ -83,8 +83,6 @@ public sealed class HookEngine : IDisposable
 
     private void OnKey(ushort vk, uint scan, bool isDown)
     {
-        // 跟踪 Shift,用于识别 ！ 这类组合标点
-        if (vk == 0x10) { _shiftHeld = isDown; return; }
         if (!isDown || !_enabled || _isProcessing) return;
 
         // 前台窗口变化时重置增量状态
@@ -102,29 +100,36 @@ public sealed class HookEngine : IDisposable
 
         if (!IsTextRelevantKey(vk)) return;
 
+        bool shiftNow = (GetAsyncKeyState(0x10) & 0x8000) != 0;
+        bool realtime = _config.ProcessingMode == CatConfig.MODE_REALTIME;
+        bool fast = KeyProducesSentenceEnd(vk, scan);
+        // 标点模式:只有句末标点(。！？)才触发,平时完全不碰输入框(不闪);
+        // 实时模式:任意文本键,停顿后处理
+        if (!realtime && !fast) return;
+
         _retryCount = 0;
-        // 句末标点(。！？!?)→ 快速检查,其余键 → 长防抖兜底(平时不闪)
-        bool fast = KeyProducesSentenceEnd(vk, scan, _shiftHeld);
+        _punctTrigger = fast;
         _debounce.Stop();
         _debounce.Interval = fast ? DEBOUNCE_FAST : DEBOUNCE_SLOW;
         _debounce.Start();
-        if (fast) Log?.Invoke($"句末标点键 vk=0x{vk:X2} shift={_shiftHeld} → 快速检查");
+        if (fast) Log?.Invoke($"句末标点键 vk=0x{vk:X2} shift={shiftNow} → 快速检查");
     }
 
     /// <summary>
-    /// 该键是否会产生句末标点(。！？!?)。先按常见按键快速判断,再用 ToUnicodeEx
-    /// 按实际键盘布局翻译兜底,兼容不同输入法。
+    /// 该键是否会产生句末标点(。！？!?)。Shift 状态用 GetAsyncKeyState 实时读取,
+    /// 再按实际键盘布局 ToUnicodeEx 翻译兜底,兼容不同输入法。
     /// </summary>
-    private bool KeyProducesSentenceEnd(ushort vk, uint scan, bool shift)
+    private bool KeyProducesSentenceEnd(ushort vk, uint scan)
     {
+        bool shiftNow = (GetAsyncKeyState(0x10) & 0x8000) != 0;
         if (vk == 0xBE) return true;              // 句号键 → 。
-        if (shift && (vk == 0x31 || vk == 0xBF)) return true; // Shift+1 → ！;Shift+/ → ？
+        if (shiftNow && (vk == 0x31 || vk == 0xBF)) return true; // Shift+1 → ！;Shift+/ → ？
         if (!IsTextRelevantKey(vk)) return false;
 
         try
         {
             byte[] state = new byte[256];
-            if (shift) state[0x10] = 0x80;
+            if (shiftNow) state[0x10] = 0x80;
             if (GetAsyncKeyState(0x11) < 0) state[0x11] = 0x80; // Ctrl
             if (GetAsyncKeyState(0x12) < 0) state[0x12] = 0x80; // Alt
             var sb = new StringBuilder(8);
@@ -176,19 +181,24 @@ public sealed class HookEngine : IDisposable
         bool needDeselect = false;
         try
         {
-            string? box = UiaHelper.ReadFocusedText();
-            if (box != null) Log?.Invoke($"检查: UIA 读取 {box.Length} 字");
-            // UIA 读到空或整个聊天记录(超长)→ 弃用,退回剪贴板快照
-            if (box != null && (box.Length == 0 || box.Length > MAX_SNAPSHOT_LEN)) box = null;
+            IntPtr curHwnd = GetForegroundWindow();
+            bool skipUia = (curHwnd != IntPtr.Zero && curHwnd == _uiaOffHwnd);
+
+            string? box = null;
+            if (!skipUia)
+            {
+                box = UiaHelper.ReadFocusedText();
+                if (box != null) Log?.Invoke($"检查: UIA 读取 {box.Length} 字");
+                // UIA 读到空或整个聊天记录(超长)→ 弃用
+                if (box != null && (box.Length == 0 || box.Length > MAX_SNAPSHOT_LEN)) box = null;
+                if (box == null)
+                {
+                    // 本窗口 UIA 读不到,标记后直接走剪贴板(避免每次都白等)
+                    _uiaOffHwnd = curHwnd;
+                }
+            }
             if (box == null)
             {
-                // 诊断:UIA 读不到时,每个窗口打印一次控件树,用于定位微信/QQ 的输入框
-                IntPtr curHwnd = GetForegroundWindow();
-                if (curHwnd != _lastDumpHwnd)
-                {
-                    _lastDumpHwnd = curHwnd;
-                    Log?.Invoke("UIA 读不到,控件树诊断:\r\n" + UiaHelper.DescribeFocusedTree());
-                }
                 box = ClipboardEngine.SnapshotActiveText();
                 usedClipboard = true;
                 // 剪贴板快照 Ctrl+A+C 会留下全选;若读到非空文本,后续需要取消全选
@@ -199,7 +209,7 @@ public sealed class HookEngine : IDisposable
             {
                 Log?.Invoke("检查: 读取失败(UIA+剪贴板均拿不到文本),跳过");
                 Cleanup(usedClipboard, needDeselect, originalClip);
-                return false;
+                return _punctTrigger; // 标点触发时重试,等字符上屏
             }
 
             string text = box.Trim();
@@ -208,7 +218,7 @@ public sealed class HookEngine : IDisposable
                 _userOriginal = "";
                 _lastSet = "";
                 Cleanup(usedClipboard, needDeselect, originalClip);
-                return false;
+                return _punctTrigger; // 标点触发时重试,等字符上屏
             }
             if (text.Length > MAX_SNAPSHOT_LEN)
             {
@@ -225,7 +235,7 @@ public sealed class HookEngine : IDisposable
             {
                 Log?.Invoke($"检查: 未以句末标点结尾([{text}]),跳过");
                 Cleanup(usedClipboard, needDeselect, originalClip);
-                return _retryCount < 1;
+                return _retryCount < 2;
             }
 
             // 写回后的回显保护
@@ -276,12 +286,18 @@ public sealed class HookEngine : IDisposable
 
             Log?.Invoke($"[{_config.ProcessingMode}] 读取=[{text}] 用户原文=[{_userOriginal}] → 目标=[{target}]");
 
-            string? writeFail = UiaHelper.WriteFocusedText(target);
-            if (writeFail != null)
+            string? writeFail = null;
+            bool needClipboardWrite = skipUia; // 窗口已标记走剪贴板 → 直接剪贴板写
+            if (!skipUia)
             {
-                Log?.Invoke("UIA 写入失败(" + writeFail + "),退回剪贴板写入");
-                // 读取时已全选(剪贴板快照),写入直接用 Ctrl+V 覆盖选中内容,不再重复 Ctrl+A
-                ClipboardEngine.WriteBackToActive(target, alreadySelected: usedClipboard);
+                writeFail = UiaHelper.WriteFocusedText(target);
+                needClipboardWrite = writeFail != null;
+            }
+            if (needClipboardWrite)
+            {
+                Log?.Invoke("写入走剪贴板(" + (writeFail ?? "UIA 已标记跳过") + ")");
+                // 始终 Ctrl+A+V 全选替换,保证在网页输入框(全选可能不保持)里也能替换成功
+                ClipboardEngine.WriteBackToActive(target);
             }
             _lastSet = target;
             _lastWriteTime = Environment.TickCount64;
