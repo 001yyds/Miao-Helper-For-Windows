@@ -1,0 +1,346 @@
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace MiaoHelper;
+
+/// <summary>
+/// 处理引擎(UIA 版):只观察按键,绝不拦截/吞掉任何键。
+/// 打字停顿后,用 UI Automation 直接读输入框文本(无闪屏、不碰剪贴板),
+/// 凡是以 。！？!? 结尾(标点模式)就处理并写回。写入优先 UIA,失败退回剪贴板方案。
+/// </summary>
+public sealed class HookEngine : IDisposable
+{
+    private const int MAX_SNAPSHOT_LEN = 500;
+    private const long WRITE_ECHO_WINDOW_MS = 600;
+    private const int DEBOUNCE_PUNCT = 500;     // 标点模式:停顿多久检查一次
+    private const int DEBOUNCE_REALTIME = 1000; // 实时模式:停顿多久处理一次
+
+    private readonly KeyboardHook _hook;
+    private readonly System.Windows.Forms.Timer _debounce;
+    private CatConfig _config;
+    private bool _isProcessing;
+    private bool _enabled = true;
+    private int _retryCount;
+    private string _userOriginal = "";
+    private string _lastSet = "";
+    private long _lastWriteTime;
+    private IntPtr _lastForeground = IntPtr.Zero;
+
+    /// <summary>调试日志(托盘写 debug.log)。</summary>
+    public event Action<string>? Log;
+
+    public HookEngine()
+    {
+        _config = CatConfig.Load();
+        _hook = new KeyboardHook();
+        _hook.Key += OnKey;
+        _debounce = new System.Windows.Forms.Timer { Interval = DEBOUNCE_PUNCT };
+        _debounce.Tick += (_, _) =>
+        {
+            _debounce.Stop();
+            bool retry = DoCheck();
+            if (retry && _retryCount < 2)
+            {
+                _retryCount++;
+                _debounce.Interval = 250;
+                _debounce.Start();
+            }
+        };
+    }
+
+    public CatConfig Config => _config;
+
+    public bool Enabled
+    {
+        get => _enabled;
+        set
+        {
+            _enabled = value;
+            if (!value) { _debounce.Stop(); _userOriginal = ""; _lastSet = ""; }
+        }
+    }
+
+    public void ReloadConfig() => _config = CatConfig.Load();
+
+    public void Start()
+    {
+        try
+        {
+            _hook.Install();
+            // 预热 UIA,避免第一次读取时的延迟
+            try { _ = UiaHelper.ReadFocusedText(); } catch { }
+            Log?.Invoke($"启动完成。模式={_config.ProcessingMode} 追加={_config.EnableAppend}(\"{_config.AppendText}\") 颜文字={_config.EnableRandomEmoticon} 规则数={_config.Rules?.Count ?? 0}");
+        }
+        catch (Exception ex) { Log?.Invoke("键盘钩子安装失败: " + ex.Message); }
+    }
+
+    public void Stop() => _hook.Uninstall();
+
+    // ---------- 键盘事件(只观察) ----------
+
+    private void OnKey(ushort vk, uint scan, bool isDown)
+    {
+        if (!isDown || !_enabled || _isProcessing) return;
+
+        // 前台窗口变化时重置增量状态(相当于原版窗口状态变化事件)
+        IntPtr hwnd = GetForegroundWindow();
+        if (hwnd != _lastForeground)
+        {
+            _lastForeground = hwnd;
+            if (_lastSet.Length > 0 || _userOriginal.Length > 0)
+            {
+                _userOriginal = "";
+                _lastSet = "";
+                Log?.Invoke("前台窗口变化,重置增量状态");
+            }
+        }
+
+        if (!IsTextRelevantKey(vk)) return;
+
+        _retryCount = 0;
+        _debounce.Stop();
+        _debounce.Interval = _config.ProcessingMode == CatConfig.MODE_REALTIME ? DEBOUNCE_REALTIME : DEBOUNCE_PUNCT;
+        _debounce.Start();
+    }
+
+    /// <summary>可能改变文本的键:退格/制表/回车/空格/删除/数字/字母/小键盘/OEM/IME 键。</summary>
+    private static bool IsTextRelevantKey(ushort vk)
+    {
+        if (vk == 0x08 || vk == 0x09 || vk == 0x0D || vk == 0x20 || vk == 0x2E) return true;
+        if (vk >= 0x30 && vk <= 0x39) return true; // 数字
+        if (vk >= 0x41 && vk <= 0x5A) return true; // 字母
+        if (vk >= 0x60 && vk <= 0x6F) return true; // 小键盘
+        if (vk >= 0xBA && vk <= 0xE7) return true; // OEM 与 IME(含 VK_PROCESSKEY 0xE5)
+        return false;
+    }
+
+    // ---------- 处理 ----------
+
+    /// <summary>返回 true 表示需要稍后重试(标点可能刚按还没上屏)。</summary>
+    private bool DoCheck()
+    {
+        if (!_enabled || _isProcessing) return false;
+        // 输入法正在组词:绝不动输入框
+        if (IsImeComposing()) return false;
+        if (IsOurWindow()) return false;
+
+        _isProcessing = true;
+        string? originalClip = ClipboardEngine.GetClipboardText();
+        try
+        {
+            string? box = UiaHelper.ReadFocusedText();
+            if (box == null)
+            {
+                // 兜底:UIA 拿不到就退回剪贴板快照
+                box = ClipboardEngine.SnapshotActiveText();
+            }
+            if (box == null)
+            {
+                Log?.Invoke("读取输入框失败(UIA+剪贴板均拿不到文本),跳过");
+                RestoreClipboard(originalClip);
+                return false;
+            }
+
+            string text = box.Trim();
+            if (text.Length == 0)
+            {
+                _userOriginal = "";
+                _lastSet = "";
+                RestoreClipboard(originalClip);
+                return false;
+            }
+            if (text.Length > MAX_SNAPSHOT_LEN)
+            {
+                Log?.Invoke($"文本过长({text.Length}字),疑似误选中页面,跳过");
+                RestoreClipboard(originalClip);
+                return false;
+            }
+
+            bool realtime = _config.ProcessingMode == CatConfig.MODE_REALTIME;
+            bool endsWithPunct = TextProcessor.IsPunctuationEnding(text);
+
+            // 标点模式:句末标点还没出现 → 稍后重试(标点可能刚按还没上屏)
+            if (!realtime && !endsWithPunct)
+            {
+                RestoreClipboard(originalClip);
+                return _retryCount < 2;
+            }
+
+            // 写回后的回显保护
+            long now = Environment.TickCount64;
+            if (_lastWriteTime > 0 && now - _lastWriteTime < WRITE_ECHO_WINDOW_MS && text == _lastSet)
+            {
+                _lastWriteTime = 0;
+                RestoreClipboard(originalClip);
+                return false;
+            }
+
+            // 增量:当前文本以 lastSet 开头 → 只取新增部分并入 userOriginal(原始文本)
+            if (_lastSet.Length > 0 && text.StartsWith(_lastSet))
+            {
+                _userOriginal += text.Substring(_lastSet.Length);
+            }
+            else
+            {
+                _userOriginal = TextProcessor.StripAll(text, _config);
+            }
+
+            if (_userOriginal.Length == 0)
+            {
+                Log?.Invoke("用户原文为空,跳过");
+                RestoreClipboard(originalClip);
+                return false;
+            }
+
+            if (!PlausibleMessage(text, endsWithPunct))
+            {
+                Log?.Invoke("文本不像聊天消息(无中文、无句末标点、含盘符路径),跳过");
+                RestoreClipboard(originalClip);
+                return false;
+            }
+
+            // 实时模式:句子未完成(不以句末标点结尾)时追加 喵,但不加随机颜文字
+            CatConfig cfg = _config;
+            if (realtime && !endsWithPunct) cfg = CloneWithoutEmoticon(cfg);
+
+            string target = TextProcessor.Process(_userOriginal, cfg);
+
+            if (target == text)
+            {
+                _lastSet = target;
+                RestoreClipboard(originalClip);
+                return false;
+            }
+
+            Log?.Invoke($"[{_config.ProcessingMode}] 读取=[{text}] 用户原文=[{_userOriginal}] → 目标=[{target}]");
+
+            bool wrote = UiaHelper.WriteFocusedText(target);
+            if (!wrote) ClipboardEngine.WriteBackToActive(target);
+            _lastSet = target;
+            _lastWriteTime = Environment.TickCount64;
+            Thread.Sleep(120);
+            RestoreClipboard(originalClip);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke("处理异常: " + ex);
+            RestoreClipboard(originalClip);
+            return false;
+        }
+        finally { _isProcessing = false; }
+    }
+
+    /// <summary>文本是否像一条聊天消息:含中文、或以句末标点结尾。挡掉文件路径/网页误选中。</summary>
+    private static bool PlausibleMessage(string text, bool endsWithPunct)
+    {
+        if (endsWithPunct) return true;
+        if (text.Contains(":\\", StringComparison.OrdinalIgnoreCase)) return false; // C:\ 盘符路径
+        foreach (char c in text)
+        {
+            // CJK 统一表意文字 / 扩展A / 兼容表意文字
+            if ((c >= '\u4E00' && c <= '\u9FFF') || (c >= '\u3400' && c <= '\u4DBF') || (c >= '\uF900' && c <= '\uFAFF'))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>手动处理当前剪贴板文本(Ctrl+Alt+M 热键 / 托盘菜单),处理后写回剪贴板。</summary>
+    public void ProcessClipboardNow()
+    {
+        if (!_enabled) return;
+        string? s = ClipboardEngine.GetClipboardText();
+        if (string.IsNullOrWhiteSpace(s)) { Log?.Invoke("剪贴板无文本,忽略"); return; }
+        // 先去旧喵/旧颜文字,再处理,保证重复处理不叠字
+        string raw = TextProcessor.ReclaimRawText(s.Trim(), _config);
+        string target = TextProcessor.Process(raw, _config);
+        ClipboardEngine.SetClipboardText(target);
+        Log?.Invoke($"剪贴板处理: [{s.Trim()}] → [{target}]");
+    }
+
+    private static CatConfig CloneWithoutEmoticon(CatConfig src) => new CatConfig
+    {
+        EnableAppend = src.EnableAppend,
+        AppendText = src.AppendText,
+        EnableRandomEmoticon = false,
+        ProcessingMode = src.ProcessingMode,
+        Rules = src.Rules,
+        CustomEmoticons = src.CustomEmoticons,
+    };
+
+    private static void RestoreClipboard(string? originalClip)
+    {
+        if (originalClip != null) ClipboardEngine.SetClipboardText(originalClip);
+    }
+
+    // ---------- 原生调用 ----------
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool fAttach);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetFocus();
+
+    [DllImport("imm32.dll")]
+    private static extern IntPtr ImmGetContext(IntPtr hWnd);
+
+    [DllImport("imm32.dll")]
+    private static extern bool ImmGetOpenStatus(IntPtr hIMC);
+
+    [DllImport("imm32.dll")]
+    private static extern int ImmGetCompositionString(IntPtr hIMC, uint dwIndex, IntPtr lpBuf, uint dwBufLen);
+
+    [DllImport("imm32.dll")]
+    private static extern bool ImmReleaseContext(IntPtr hWnd, IntPtr hIMC);
+
+    /// <summary>输入法是否正在组词(拼音未上屏)。用 AttachThreadInput 取到前台窗口真正聚焦的控件。</summary>
+    private static bool IsImeComposing()
+    {
+        try
+        {
+            IntPtr hFore = GetForegroundWindow();
+            if (hFore == IntPtr.Zero) return false;
+            uint fgTid = GetWindowThreadProcessId(hFore, out _);
+            uint myTid = GetCurrentThreadId();
+
+            bool attached = false;
+            if (fgTid != myTid) attached = AttachThreadInput(myTid, fgTid, true);
+            IntPtr hFocus = GetFocus();
+            if (attached) AttachThreadInput(myTid, fgTid, false);
+            if (hFocus == IntPtr.Zero) hFocus = hFore;
+
+            IntPtr imc = ImmGetContext(hFocus);
+            if (imc == IntPtr.Zero) return false;
+            try
+            {
+                if (!ImmGetOpenStatus(imc)) return false;
+                return ImmGetCompositionString(imc, 0x0008 /* GCS_COMPSTR */, IntPtr.Zero, 0) > 0;
+            }
+            finally { ImmReleaseContext(hFocus, imc); }
+        }
+        catch { return false; }
+    }
+
+    private static bool IsOurWindow()
+    {
+        IntPtr h = GetForegroundWindow();
+        GetWindowThreadProcessId(h, out uint pid);
+        return pid == Environment.ProcessId;
+    }
+
+    public void Dispose()
+    {
+        _debounce.Stop();
+        _hook.Dispose();
+    }
+}

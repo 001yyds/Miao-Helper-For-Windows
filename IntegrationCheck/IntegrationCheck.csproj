@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>false</UseWindowsForms>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\MiaoHelper\TextProcessor.cs" Link="TextProcessor.cs" />
+    <Compile Include="..\MiaoHelper\CatConfig.cs" Link="CatConfig.cs" />
+    <Compile Include="..\MiaoHelper\ClipboardEngine.cs" Link="ClipboardEngine.cs" />
+    <Compile Include="..\MiaoHelper\UiaHelper.cs" Link="UiaHelper.cs" />
+  </ItemGroup>
+
+</Project>

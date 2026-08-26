@@ -1,0 +1,13 @@
+# 构建产物
+bin/
+obj/
+dist/
+publish/
+
+# 用户/IDE 文件
+.vs/
+*.user
+*.suo
+
+# 本地配置
+*.local.json

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <!-- 复用主项目的纯逻辑文件,不依赖 WinForms -->
+  <ItemGroup>
+    <Compile Include="..\MiaoHelper\TextProcessor.cs" Link="TextProcessor.cs" />
+    <Compile Include="..\MiaoHelper\CatConfig.cs" Link="CatConfig.cs" />
+  </ItemGroup>
+
+</Project>
