@@ -61,7 +61,8 @@ try
         else Console.WriteLine("  焦点元素无 ValuePattern");
     }
     catch (Exception ex) { Console.WriteLine("  UIA 写入诊断异常: " + ex.Message); }
-    bool wroteUia = UiaHelper.WriteFocusedText(uiaTarget);
+    string? writeFail = UiaHelper.WriteFocusedText(uiaTarget);
+    bool wroteUia = writeFail == null;
     Thread.Sleep(300);
     string? uia2 = UiaHelper.ReadFocusedText();
     Console.WriteLine($"  UIA 写回: [{uia2}] (wroteUia={wroteUia})");
