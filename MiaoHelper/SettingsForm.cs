@@ -16,7 +16,7 @@ public sealed class SettingsForm : Form
     private readonly CheckBox chkEmoticon;
     private readonly TextBox txtRules;
     private readonly TextBox txtEmoticons;
-    private readonly Label lblTest;
+    private TestForm? _testForm;
 
     public SettingsForm(HookEngine engine)
     {
@@ -122,18 +122,11 @@ public sealed class SettingsForm : Form
 
         // ---- 测试 / 保存 / 取消 ----
         var btnTest = new Button { Text = "测试", Location = new Point(16, 500), Size = new Size(80, 30) };
-        lblTest = new Label
-        {
-            Text = "",
-            Location = new Point(104, 507),
-            AutoSize = true,
-            ForeColor = Color.DarkSlateGray,
-        };
         var btnSave = new Button { Text = "保存", Location = new Point(280, 500), Size = new Size(80, 30), DialogResult = DialogResult.OK };
         var btnCancel = new Button { Text = "取消", Location = new Point(364, 500), Size = new Size(80, 30), DialogResult = DialogResult.Cancel };
         var lblCredit = new Label
         {
-            Text = "v1.2 by---JanVvoch",
+            Text = "v2.0 by---JanVvoch",
             Location = new Point(16, 540),
             AutoSize = true,
             ForeColor = Color.Gray,
@@ -147,7 +140,7 @@ public sealed class SettingsForm : Form
         Controls.AddRange(new Control[]
         {
             title, gMode, gAppend, gRules, gEmo,
-            btnTest, lblTest, btnSave, btnCancel, lblCredit,
+            btnTest, btnSave, btnCancel, lblCredit,
         });
 
         LoadConfigToUi();
@@ -169,9 +162,18 @@ public sealed class SettingsForm : Form
         var cfg = BuildConfig();
         cfg.ApplyRulesText(txtRules.Text);
         cfg.ApplyCustomEmoticonsText(txtEmoticons.Text);
-        string input = "你好，世界。";
-        string result = TextProcessor.Process(input, cfg);
-        lblTest.Text = "测试：你好，世界。 → " + result;
+
+        if (_testForm == null || _testForm.IsDisposed)
+        {
+            _testForm = new TestForm(cfg);
+            _testForm.Show(this);
+        }
+        else
+        {
+            _testForm.SetConfig(cfg);
+            _testForm.Activate();
+            _testForm.BringToFront();
+        }
     }
 
     private CatConfig BuildConfig() => new CatConfig
