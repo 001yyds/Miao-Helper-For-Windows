@@ -3,7 +3,7 @@ using System.Windows.Forms;
 
 namespace MiaoHelper;
 
-/// <summary>设置窗口:6 个自定义项 + 测试按钮。</summary>
+/// <summary>设置窗口:6 个自定义项 + 开机自启动 + 测试按钮。</summary>
 public sealed class SettingsForm : Form
 {
     private readonly HookEngine _engine;
@@ -17,6 +17,7 @@ public sealed class SettingsForm : Form
     private readonly TextBox txtTrigger;
     private readonly TextBox txtRules;
     private readonly TextBox txtEmoticons;
+    private readonly CheckBox chkAutoStart;
     private TestForm? _testForm;
 
     public SettingsForm(HookEngine engine)
@@ -29,7 +30,7 @@ public sealed class SettingsForm : Form
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(460, 620);
+        ClientSize = new Size(460, 668);
 
         var title = new Label
         {
@@ -134,14 +135,24 @@ public sealed class SettingsForm : Form
         gEmo.Controls.Add(lblEmoHint);
         gEmo.Controls.Add(txtEmoticons);
 
+        // ---- 开机自启动 ----
+        var gAutoStart = new GroupBox { Text = "开机自启动", Location = new Point(16, 540), Size = new Size(428, 52) };
+        chkAutoStart = new CheckBox
+        {
+            Text = "登录 Windows 后自动启动喵喵助手（写入当前用户启动项）",
+            Location = new Point(14, 20),
+            AutoSize = true,
+        };
+        gAutoStart.Controls.Add(chkAutoStart);
+
         // ---- 测试 / 保存 / 取消 ----
-        var btnTest = new Button { Text = "测试", Location = new Point(16, 540), Size = new Size(80, 30) };
-        var btnSave = new Button { Text = "保存", Location = new Point(280, 540), Size = new Size(80, 30), DialogResult = DialogResult.OK };
-        var btnCancel = new Button { Text = "取消", Location = new Point(364, 540), Size = new Size(80, 30), DialogResult = DialogResult.Cancel };
+        var btnTest = new Button { Text = "测试", Location = new Point(16, 600), Size = new Size(80, 30) };
+        var btnSave = new Button { Text = "保存", Location = new Point(280, 600), Size = new Size(80, 30), DialogResult = DialogResult.OK };
+        var btnCancel = new Button { Text = "取消", Location = new Point(364, 600), Size = new Size(80, 30), DialogResult = DialogResult.Cancel };
         var lblCredit = new Label
         {
-            Text = "v2.1 by---JanVvoch",
-            Location = new Point(16, 580),
+            Text = "v2.2 by---JanVvoch",
+            Location = new Point(16, 644),
             AutoSize = true,
             ForeColor = Color.Gray,
         };
@@ -154,7 +165,7 @@ public sealed class SettingsForm : Form
 
         Controls.AddRange(new Control[]
         {
-            title, gMode, gTrigger, gAppend, gRules, gEmo,
+            title, gMode, gTrigger, gAppend, gRules, gEmo, gAutoStart,
             btnTest, btnSave, btnCancel, lblCredit,
         });
 
@@ -173,6 +184,7 @@ public sealed class SettingsForm : Form
         chkEmoticon.Checked = _cfg.EnableRandomEmoticon;
         txtRules.Text = _cfg.RulesToString();
         txtEmoticons.Text = _cfg.CustomEmoticonsText;
+        chkAutoStart.Checked = AutoStart.IsEnabled();
     }
 
     private void Test()
@@ -211,6 +223,8 @@ public sealed class SettingsForm : Form
         cfg.ApplyCustomEmoticonsText(txtEmoticons.Text);
         cfg.Save();
         _engine.ReloadConfig();
+        // 开机自启动是系统级注册表操作,随保存一起应用
+        AutoStart.Apply(chkAutoStart.Checked);
         Close();
     }
 }
