@@ -57,8 +57,8 @@ public sealed class CatConfig
     public string AppendText { get; set; } = "喵";
     public bool EnableRandomEmoticon { get; set; } = true;
     public string ProcessingMode { get; set; } = MODE_PUNCTUATION;
-    /// <summary>触发标点符号:文本以此列表中的任一字符结尾时处理。默认 。！？!? + 空格。</summary>
-    public string TriggerPunctuation { get; set; } = "。！？!? ";
+    /// <summary>触发标点符号:文本以此列表中的任一字符结尾时处理。默认 。！？!?（不含空格，用户可自行加）。</summary>
+    public string TriggerPunctuation { get; set; } = "。！？!?";
     public List<Rule> Rules { get; set; } = new();
     public List<string> CustomEmoticons { get; set; } = new();
 

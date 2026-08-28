@@ -62,7 +62,7 @@ public sealed class SettingsForm : Form
         txtTrigger = new TextBox { Location = new Point(14, 20), Width = 280 };
         var lblTriggerHint = new Label
         {
-            Text = "（遇这些字符立即处理，默认 。！？!? ）",
+            Text = "（遇这些字符立即处理，默认 。！？!?，不含空格）",
             Location = new Point(300, 24),
             AutoSize = true,
             ForeColor = Color.Gray,

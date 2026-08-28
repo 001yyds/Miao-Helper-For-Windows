@@ -56,16 +56,18 @@ string withEmo = "在吗喵。 ( Φ ω Φ )";
 string stripped = TextProcessor.StripAll(withEmo, cfg);
 Check("StripAll 去颜文字", !stripped.Contains("Φ"));
 
-// 10. IsPunctuationEnding(默认触发符号。！？!? + 空格)
+// 10. IsPunctuationEnding(默认触发符号。！？!?，不含空格)
 Check("句末标点判定", TextProcessor.IsPunctuationEnding("你好。", cfg.TriggerPunctuation)
     && TextProcessor.IsPunctuationEnding("你好！", cfg.TriggerPunctuation)
     && TextProcessor.IsPunctuationEnding("你好?", cfg.TriggerPunctuation)
-    && TextProcessor.IsPunctuationEnding("你好 ", cfg.TriggerPunctuation));
-Check("非句末标点", !TextProcessor.IsPunctuationEnding("你好", cfg.TriggerPunctuation));
+    && TextProcessor.IsPunctuationEnding("你好！", cfg.TriggerPunctuation));
+Check("非句末标点(含空格)", !TextProcessor.IsPunctuationEnding("你好", cfg.TriggerPunctuation)
+    && !TextProcessor.IsPunctuationEnding("你好 ", cfg.TriggerPunctuation));
 
-// 10b. 自定义触发符号
-Check("自定义触发符号", TextProcessor.IsPunctuationEnding("你好~", "~") 
+// 10b. 自定义触发符号(含手动加空格)
+Check("自定义触发符号", TextProcessor.IsPunctuationEnding("你好~", "~")
     && !TextProcessor.IsPunctuationEnding("你好。", "~"));
+Check("手动加空格触发", TextProcessor.IsPunctuationEnding("你好 ", "。！？!? "));
 
 // 11. 整句无标点追加
 var cfg6 = new CatConfig { EnableRandomEmoticon = false };
