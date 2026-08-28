@@ -276,7 +276,11 @@ public sealed class HookEngine : IDisposable
             }
             else
             {
-                _userOriginal = TextProcessor.StripAll(text, _config);
+                // 文本不是在上次写回结果上继续输入(用户删改过已处理文本/窗口切换/重启等)。
+                // 必须还原成"用户原始文本":StripAll 只去旧颜文字,会残留已追加的"喵",
+                // 再跑 Process 就会每句再叠一个"喵"(如 你好喵 → 你好喵喵)。
+                // ReclaimRawText = 去颜文字 + 去每句末尾已追加文本,与 Process 互逆。
+                _userOriginal = TextProcessor.ReclaimRawText(text, _config);
             }
 
             if (_userOriginal.Length == 0)

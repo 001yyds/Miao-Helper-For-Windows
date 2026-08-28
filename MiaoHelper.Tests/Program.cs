@@ -79,6 +79,10 @@ string r12 = TextProcessor.Process("今天天气真好，出去走走 吧！", c
 Check("混合切分", r12 == "今天天气真好喵，出去走走喵 吧喵！");
 
 // 13. 配置保存/加载 JSON 往返
+// ⚠️ CatConfig 直接读写真实配置路径(%APPDATA%\喵喵助手\config.json):
+//    先备份,测试完恢复,绝不能让测试删除/覆盖用户的真实配置。
+string cfgPath13 = CatConfig.ConfigPath;
+string? cfgBackup13 = File.Exists(cfgPath13) ? File.ReadAllText(cfgPath13) : null;
 var cfg8 = new CatConfig { AppendText = "~", ProcessingMode = CatConfig.MODE_REALTIME };
 cfg8.Rules.Add(new Rule { From = "a", To = "b" });
 cfg8.CustomEmoticons.Add("(o.o)");
@@ -88,7 +92,12 @@ Check("配置保存/加载", cfg9.AppendText == "~"
     && cfg9.ProcessingMode == CatConfig.MODE_REALTIME
     && cfg9.Rules.Count == 1 && cfg9.Rules[0].From == "a" && cfg9.Rules[0].To == "b"
     && cfg9.CustomEmoticons.Count == 1 && cfg9.CustomEmoticons[0] == "(o.o)");
-File.Delete(CatConfig.ConfigPath); // 清理测试残留
+try
+{
+    if (cfgBackup13 != null) File.WriteAllText(cfgPath13, cfgBackup13);
+    else if (File.Exists(cfgPath13)) File.Delete(cfgPath13); // 原本没有配置则恢复为没有
+}
+catch { }
 
 // 14. ReclaimRawText:还原已处理文本,重复处理不叠喵
 var cfgR = new CatConfig { EnableRandomEmoticon = false };
@@ -113,6 +122,27 @@ Check("RulesToString 用 CRLF", cfgRL.RulesToString() == "a=1\r\nb=2");
 var cfgRL2 = new CatConfig();
 cfgRL2.ApplyRulesText("a=1\r\nb=2");
 Check("CRLF 规则解析", cfgRL2.Rules.Count == 2 && cfgRL2.Rules[1].From == "b");
+
+// 18. 双喵回归:用户删改过已处理文本(前缀不再等于 lastSet)→ 走 ReclaimRawText 还原,不得叠喵
+//     场景:先处理成 "你好喵，世界喵。",用户把第二句的喵删了再触发 → 应还原成原文重新处理
+var cfgR2 = new CatConfig { EnableRandomEmoticon = false };
+string edited = "你好喵，世界。"; // 已处理文本被用户删改(前缀与 lastSet 不匹配)
+string raw18 = TextProcessor.ReclaimRawText(edited, cfgR2);
+string r18 = TextProcessor.Process(raw18, cfgR2);
+Check("删改已处理文本不叠喵", r18 == "你好喵，世界喵。" && !r18.Contains("喵喵"));
+
+// 19. 双喵回归(多行,复现 debug.log 13:58 场景):
+//     第一次处理把每行都加了喵,用户把最后一行"/喵"删掉重打句号,再次触发不得每行双喵
+var cfgR3 = new CatConfig { EnableRandomEmoticon = false };
+string edited19 = "修复清单：喵\n按取消没反应喵\n自定义符号触发喵\n\n测试一下。";
+string raw19 = TextProcessor.ReclaimRawText(edited19, cfgR3);
+string r19 = TextProcessor.Process(raw19, cfgR3);
+Check("多行删改后不叠喵", r19 == "修复清单：喵\n按取消没反应喵\n自定义符号触发喵\n\n测试一下喵。" && !r19.Contains("喵喵"));
+
+// 20. 尾部句号保留(切分正则把句号当分隔符,应原样拼回)
+var cfgR4 = new CatConfig { EnableRandomEmoticon = false };
+Check("尾部句号保留", TextProcessor.Process("测试一下/。", cfgR4) == "测试一下/喵。");
+Check("尾部问号保留", TextProcessor.Process("在吗？", cfgR4) == "在吗喵？");
 
 Console.WriteLine();
 Console.WriteLine(failed == 0 ? "全部通过 ✅" : $"有 {failed} 项失败 ❌");
