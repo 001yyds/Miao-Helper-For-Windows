@@ -140,7 +140,7 @@ public sealed class SettingsForm : Form
         var btnCancel = new Button { Text = "取消", Location = new Point(364, 540), Size = new Size(80, 30), DialogResult = DialogResult.Cancel };
         var lblCredit = new Label
         {
-            Text = "v2.0 by---JanVvoch",
+            Text = "v2.1 by---JanVvoch",
             Location = new Point(16, 580),
             AutoSize = true,
             ForeColor = Color.Gray,
