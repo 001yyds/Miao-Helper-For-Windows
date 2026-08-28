@@ -127,8 +127,12 @@ public sealed class HookEngine : IDisposable
         bool shiftNow = (GetAsyncKeyState(0x10) & 0x8000) != 0;
 
         // 针对单个按键就能打出的常见标点做 VK 快速判断（不用 ToUnicodeEx 兜底）
-        // 。键 = vk 0xBE
-        if (vk == 0xBE && triggerPunct.Contains('。')) return true;
+        // 句号键 vk=0xBE:中文输入法打出全角'。'(快速触发);英文输入模式打出半角'.'。
+        // 若英文模式也按'。'快速触发,会"快速检查→文本未以触发符号结尾→重试3次",
+        // 每次重试都做剪贴板快照+取消全选,表现为闪屏三下且啥事不干。
+        // 故仅输入法开启(会打出'。')时快速触发;英文模式交给下方 ToUnicodeEx 精确翻译。
+        if (vk == 0xBE && IsImeActive() && (triggerPunct.Contains('。') || triggerPunct.Contains('.')))
+            return true;
         // 空格键 = vk 0x20
         if (vk == 0x20 && triggerPunct.Contains(' ')) return true;
         // 逗号键 = Shift+, → < ；非 Shift → ，
@@ -429,13 +433,13 @@ public sealed class HookEngine : IDisposable
     [DllImport("imm32.dll")]
     private static extern bool ImmReleaseContext(IntPtr hWnd, IntPtr hIMC);
 
-    /// <summary>输入法是否正在组词(拼音未上屏)。用 AttachThreadInput 取到前台窗口真正聚焦的控件。</summary>
-    private static bool IsImeComposing()
+    /// <summary>取前台窗口真正聚焦控件的输入法上下文(hFocus, imc)。AttachThreadInput 保证跨线程取到正确的 GetFocus。</summary>
+    private static (IntPtr hFocus, IntPtr imc) GetImeContext()
     {
         try
         {
             IntPtr hFore = GetForegroundWindow();
-            if (hFore == IntPtr.Zero) return false;
+            if (hFore == IntPtr.Zero) return (IntPtr.Zero, IntPtr.Zero);
             uint fgTid = GetWindowThreadProcessId(hFore, out _);
             uint myTid = GetCurrentThreadId();
 
@@ -445,16 +449,31 @@ public sealed class HookEngine : IDisposable
             if (attached) AttachThreadInput(myTid, fgTid, false);
             if (hFocus == IntPtr.Zero) hFocus = hFore;
 
-            IntPtr imc = ImmGetContext(hFocus);
-            if (imc == IntPtr.Zero) return false;
-            try
-            {
-                if (!ImmGetOpenStatus(imc)) return false;
-                return ImmGetCompositionString(imc, 0x0008 /* GCS_COMPSTR */, IntPtr.Zero, 0) > 0;
-            }
-            finally { ImmReleaseContext(hFocus, imc); }
+            return (hFocus, ImmGetContext(hFocus));
         }
-        catch { return false; }
+        catch { return (IntPtr.Zero, IntPtr.Zero); }
+    }
+
+    /// <summary>当前前台输入法是否开启(中文模式)。英文输入模式返回 false。</summary>
+    private static bool IsImeActive()
+    {
+        var (hFocus, imc) = GetImeContext();
+        if (imc == IntPtr.Zero) return false;
+        try { return ImmGetOpenStatus(imc); }
+        finally { if (hFocus != IntPtr.Zero) ImmReleaseContext(hFocus, imc); }
+    }
+
+    /// <summary>输入法是否正在组词(拼音未上屏)。用 AttachThreadInput 取到前台窗口真正聚焦的控件。</summary>
+    private static bool IsImeComposing()
+    {
+        var (hFocus, imc) = GetImeContext();
+        if (imc == IntPtr.Zero) return false;
+        try
+        {
+            if (!ImmGetOpenStatus(imc)) return false;
+            return ImmGetCompositionString(imc, 0x0008 /* GCS_COMPSTR */, IntPtr.Zero, 0) > 0;
+        }
+        finally { if (hFocus != IntPtr.Zero) ImmReleaseContext(hFocus, imc); }
     }
 
     private static bool IsOurWindow()
