@@ -81,8 +81,8 @@ public sealed class SettingsForm : Form
         txtAppendText = new TextBox { Location = new Point(190, 20), Width = 120 };
         var lblAppendHint = new Label
         {
-            Text = "（默认：喵）",
-            Location = new Point(318, 24),
+            Text = "（留空 = 默认「喵」）",
+            Location = new Point(300, 24),
             AutoSize = true,
             ForeColor = Color.Gray,
         };
@@ -167,7 +167,9 @@ public sealed class SettingsForm : Form
         rdoPunct.Checked = !rdoRealtime.Checked;
         txtTrigger.Text = _cfg.TriggerPunctuation;
         chkAppend.Checked = _cfg.EnableAppend;
-        txtAppendText.Text = _cfg.AppendText;
+        // 默认值"喵"不预填进输入框(否则容易被误认成空白、再输入一遍变"喵喵"),
+        // 以灰色提示"留空 = 默认「喵」"代替;非默认值才显示实际内容。
+        txtAppendText.Text = _cfg.AppendText == "喵" ? "" : _cfg.AppendText;
         chkEmoticon.Checked = _cfg.EnableRandomEmoticon;
         txtRules.Text = _cfg.RulesToString();
         txtEmoticons.Text = _cfg.CustomEmoticonsText;
@@ -197,7 +199,8 @@ public sealed class SettingsForm : Form
         ProcessingMode = rdoRealtime.Checked ? CatConfig.MODE_REALTIME : CatConfig.MODE_PUNCTUATION,
         TriggerPunctuation = txtTrigger.Text,
         EnableAppend = chkAppend.Checked,
-        AppendText = txtAppendText.Text,
+        // 空/纯空白回落默认"喵":用户把输入框清空也不至于丢掉追加功能或保存成空串
+        AppendText = string.IsNullOrWhiteSpace(txtAppendText.Text) ? "喵" : txtAppendText.Text.Trim(),
         EnableRandomEmoticon = chkEmoticon.Checked,
     };
 
