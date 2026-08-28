@@ -12,8 +12,8 @@ public sealed class Rule
 }
 
 /// <summary>
-/// 配置(对应原版 SharedPreferences cat_config)。6 个可自定义键:
-/// 处理模式 / 断句追加开关 / 追加文本 / 句末颜文字开关 / 替换规则 / 自定义颜文字。
+/// 配置(对应原版 SharedPreferences cat_config)。7 个可自定义键:
+/// 处理模式 / 断句追加开关 / 追加文本 / 句末颜文字开关 / 替换规则 / 自定义颜文字 / 触发符号。
 /// </summary>
 public sealed class CatConfig
 {
@@ -57,6 +57,8 @@ public sealed class CatConfig
     public string AppendText { get; set; } = "喵";
     public bool EnableRandomEmoticon { get; set; } = true;
     public string ProcessingMode { get; set; } = MODE_PUNCTUATION;
+    /// <summary>触发标点符号:文本以此列表中的任一字符结尾时处理。默认 。！？!? + 空格。</summary>
+    public string TriggerPunctuation { get; set; } = "。！？!? ";
     public List<Rule> Rules { get; set; } = new();
     public List<string> CustomEmoticons { get; set; } = new();
 

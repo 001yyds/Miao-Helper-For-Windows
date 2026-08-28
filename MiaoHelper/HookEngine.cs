@@ -121,17 +121,39 @@ public sealed class HookEngine : IDisposable
     /// </summary>
     private bool KeyProducesSentenceEnd(ushort vk, uint scan)
     {
+        string triggerPunct = _config.TriggerPunctuation;
+        if (string.IsNullOrEmpty(triggerPunct)) return false;
+
         bool shiftNow = (GetAsyncKeyState(0x10) & 0x8000) != 0;
-        if (vk == 0xBE) return true;              // 句号键 → 。
-        if (shiftNow && (vk == 0x31 || vk == 0xBF)) return true; // Shift+1 → ！;Shift+/ → ？
+
+        // 针对单个按键就能打出的常见标点做 VK 快速判断（不用 ToUnicodeEx 兜底）
+        // 。键 = vk 0xBE
+        if (vk == 0xBE && triggerPunct.Contains('。')) return true;
+        // 空格键 = vk 0x20
+        if (vk == 0x20 && triggerPunct.Contains(' ')) return true;
+        // 逗号键 = Shift+, → < ；非 Shift → ，
+        if (vk == 0xBC)
+        {
+            if (triggerPunct.Contains(',')) return true;
+            if (!shiftNow && triggerPunct.Contains('，')) return true;
+        }
+
+        // Shift+1 → ！；Shift+/ → ？；Shift+, → < ；Shift+. → >
+        if (shiftNow && (vk == 0x31 || vk == 0xBF))
+        {
+            char c = vk == 0x31 ? '！' : '？';
+            if (triggerPunct.Contains(c)) return true;
+        }
+
         if (!IsTextRelevantKey(vk)) return false;
 
+        // ToUnicodeEx 兜底：翻译按键，看打出的字符是否在触发符号里
         try
         {
             byte[] state = new byte[256];
             if (shiftNow) state[0x10] = 0x80;
-            if (GetAsyncKeyState(0x11) < 0) state[0x11] = 0x80; // Ctrl
-            if (GetAsyncKeyState(0x12) < 0) state[0x12] = 0x80; // Alt
+            if (GetAsyncKeyState(0x11) < 0) state[0x11] = 0x80;
+            if (GetAsyncKeyState(0x12) < 0) state[0x12] = 0x80;
             var sb = new StringBuilder(8);
             int r = ToUnicodeEx(vk, scan, state, sb, 8, 0, IntPtr.Zero);
             if (r > 0)
@@ -139,9 +161,9 @@ public sealed class HookEngine : IDisposable
                 for (int i = 0; i < sb.Length; i++)
                 {
                     char c = sb[i];
-                    if (c == '。' || c == '！' || c == '？' || c == '!' || c == '?')
+                    if (triggerPunct.IndexOf(c) >= 0)
                     {
-                        Log?.Invoke($"ToUnicodeEx 识别句末标点 '{c}' vk=0x{vk:X2}");
+                        Log?.Invoke($"ToUnicodeEx 识别触发符号 '{c}' vk=0x{vk:X2}");
                         return true;
                     }
                 }
@@ -228,7 +250,7 @@ public sealed class HookEngine : IDisposable
             }
 
             bool realtime = _config.ProcessingMode == CatConfig.MODE_REALTIME;
-            bool endsWithPunct = TextProcessor.IsPunctuationEnding(text);
+            bool endsWithPunct = TextProcessor.IsPunctuationEnding(text, _config.TriggerPunctuation);
 
             // 标点模式:句末标点还没出现 → 稍后重试(标点可能刚按还没上屏)
             if (!realtime && !endsWithPunct)

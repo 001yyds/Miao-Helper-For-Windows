@@ -157,16 +157,11 @@ public static class TextProcessor
         return sb.ToString().Trim();
     }
 
-    /// <summary>句末标点判定,与原版 isPunctuationEnding 一致:。！!？? 和空格。</summary>
-    public static bool IsPunctuationEnding(string text)
+    /// <summary>句末标点判定:文本末尾字符是否在 triggerPunct 中。</summary>
+    public static bool IsPunctuationEnding(string text, string triggerPunct)
     {
-        if (string.IsNullOrEmpty(text)) return false;
+        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(triggerPunct)) return false;
         char c = text[^1];
-        return c == '。'   // 。
-            || c == '！'   // ！
-            || c == '!'        // !
-            || c == '？'   // ？
-            || c == '?'        // ?
-            || c == ' ';       // 空格
+        return triggerPunct.IndexOf(c) >= 0;
     }
 }
