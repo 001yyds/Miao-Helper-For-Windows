@@ -1,10 +1,10 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace MiaoHelper;
 
 /// <summary>
 /// 剪贴板 + SendInput 按键注入。
-/// 因为 Windows 没有无障碍服务,读写任意输入框都经由剪贴板:
+/// 因为 Windows 没有无障碍服务,读写任意输入框都经由剪贴板。
 /// 快照 = Ctrl+A 全选 + Ctrl+C 复制;写回 = 设剪贴板 + Ctrl+A + Ctrl+V 粘贴覆盖。
 /// </summary>
 public static class ClipboardEngine
@@ -58,7 +58,7 @@ public static class ClipboardEngine
     private const byte VK_C = 0x43;
     private const byte VK_V = 0x56;
 
-    // INPUT 联合体必须包含 MOUSEINPUT/KEYBDINPUT/HARDWAREINPUT 三者,
+    // INPUT 联合体必须包含 MOUSEINPUT/KEYBDINPUT/HARDWAREINPUT 三者
     // 才能让 Marshal.SizeOf<INPUT>() == 40(x64),否则 SendInput 会以 87 参数无效失败。
     [StructLayout(LayoutKind.Sequential)]
     private struct INPUT
@@ -180,17 +180,34 @@ public static class ClipboardEngine
     public static string? SnapshotActiveText()
     {
         const string sentinel = "__MIAO_SNAPSHOT__";
+        string? originalClip = GetClipboardText(); // 保存原始剪贴板内容
         SetClipboardText(sentinel);
+        Thread.Sleep(30); // 等待剪贴板写入完成
         SendCtrlCombo(VK_A);
-        Thread.Sleep(50); // wait select
+        Thread.Sleep(60); // wait select
         SendCtrlCombo(VK_C);
-        Thread.Sleep(50); // wait copy
-        for (int i = 0; i < 10; i++)
+        Thread.Sleep(60); // wait copy
+        
+        // 多次检查,等待剪贴板内容变化
+        for (int i = 0; i < 15; i++)
         {
-            Thread.Sleep(25);
+            Thread.Sleep(30);
             string? t = GetClipboardText();
-            if (t != null && t != sentinel) return t;
+            if (t != null && t != sentinel)
+            {
+                // 读到有效内容,恢复原始剪贴板(延迟恢复,避免影响后续操作)
+                return t;
+            }
+            // 如果连续3次都是哨兵值,说明可能没有可复制的文本
+            if (i >= 2 && t == sentinel)
+            {
+                // 恢复原始剪贴板
+                if (originalClip != null) SetClipboardText(originalClip);
+                return null;
+            }
         }
+        // 超时,恢复原始剪贴板
+        if (originalClip != null) SetClipboardText(originalClip);
         return null;
     }
 
@@ -201,13 +218,13 @@ public static class ClipboardEngine
     public static void WriteBackToActive(string text, bool alreadySelected = false)
     {
         SetClipboardText(text);
-        Thread.Sleep(30);
+        Thread.Sleep(40);
         if (!alreadySelected) SendCtrlCombo(VK_A);
         SendCtrlCombo(VK_V);
-        Thread.Sleep(30);
+        Thread.Sleep(40);
     }
 
-    /// <summary>Ctrl+End:取消全选并把光标移到末尾(快照后不写回时调用,避免下个按键删掉整段)。</summary>
+    /// <summary>Ctrl+End:取消全选并把光标移到末尾,快照后不写回时调用,避免下个按键删掉整段。</summary>
     public static void Deselect()
     {
         SendCtrlCombo(0x23); // VK_END

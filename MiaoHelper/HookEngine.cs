@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 
@@ -15,9 +15,11 @@ public sealed class HookEngine : IDisposable
     private const long WRITE_ECHO_WINDOW_MS = 600;
     private const int DEBOUNCE_FAST = 200;       // 检测到句末标点(。！？)后,快速检查
     private const int DEBOUNCE_SLOW = 1200;      // 其他按键:长防抖兜底,平时不闪
+    private const int UIA_CACHE_RESET_MS = 30000; // UIA缓存重置间隔(30秒)
 
     private readonly KeyboardHook _hook;
     private readonly System.Windows.Forms.Timer _debounce;
+    private readonly System.Windows.Forms.Timer _uiaCacheReset; // UIA缓存重置定时器
     private CatConfig _config;
     private bool _isProcessing;
     private bool _enabled = true;
@@ -49,6 +51,17 @@ public sealed class HookEngine : IDisposable
                 _debounce.Start();
             }
         };
+        
+        // UIA缓存重置定时器:定期清除缓存,让之前读不到UIA的窗口有机会重新尝试
+        _uiaCacheReset = new System.Windows.Forms.Timer { Interval = UIA_CACHE_RESET_MS };
+        _uiaCacheReset.Tick += (_, _) =>
+        {
+            if (_uiaOffHwnd != IntPtr.Zero)
+            {
+                Log?.Invoke("UIA缓存重置:清除窗口标记,下次将重新尝试UIA读取");
+                _uiaOffHwnd = IntPtr.Zero;
+            }
+        };
     }
 
     public CatConfig Config => _config;
@@ -70,6 +83,7 @@ public sealed class HookEngine : IDisposable
         try
         {
             _hook.Install();
+            _uiaCacheReset.Start(); // 启动UIA缓存重置定时器
             // 预热 UIA,避免第一次读取时的延迟
             try { _ = UiaHelper.ReadFocusedText(); } catch { }
             Log?.Invoke($"启动完成。模式={_config.ProcessingMode} 追加={_config.EnableAppend}(\"{_config.AppendText}\") 颜文字={_config.EnableRandomEmoticon} 规则数={_config.Rules?.Count ?? 0}");
@@ -77,7 +91,11 @@ public sealed class HookEngine : IDisposable
         catch (Exception ex) { Log?.Invoke("键盘钩子安装失败: " + ex.Message); }
     }
 
-    public void Stop() => _hook.Uninstall();
+    public void Stop()
+    {
+        _hook.Uninstall();
+        _uiaCacheReset.Stop();
+    }
 
     // ---------- 键盘事件(只观察) ----------
 
@@ -129,27 +147,16 @@ public sealed class HookEngine : IDisposable
         // 针对单个按键就能打出的常见标点做 VK 快速判断（不用 ToUnicodeEx 兜底）
         // 句号键 vk=0xBE:中文输入法打出全角'。'(快速触发);英文输入模式打出半角'.'。
         // 若英文模式也按'。'快速触发,会"快速检查→文本未以触发符号结尾→重试3次",
-        // 每次重试都做剪贴板快照+取消全选,表现为闪屏三下且啥事不干。
-        // 故仅输入法开启(会打出'。')时快速触发;英文模式交给下方 ToUnicodeEx 精确翻译。
-        if (vk == 0xBE && IsImeActive() && (triggerPunct.Contains('。') || triggerPunct.Contains('.')))
-            return true;
-        // 空格键 = vk 0x20
-        if (vk == 0x20 && triggerPunct.Contains(' ')) return true;
-        // 逗号键 = Shift+, → < ；非 Shift → ，
-        if (vk == 0xBC)
+        // 每次重试都做剪贴板快照+取消全选,闪3下很烦。
+        // 修复:vk=0xBE 快速触发仅在中文输入法开启时生效,英文模式落到 ToUnicodeEx 兜底。
+        if (vk == 0xBE && IsImeActive())
         {
-            if (triggerPunct.Contains(',')) return true;
-            if (!shiftNow && triggerPunct.Contains('，')) return true;
+            if (triggerPunct.IndexOf('。') >= 0) return true;
+            if (triggerPunct.IndexOf('.') >= 0) return true;
         }
-
-        // Shift+1 → ！；Shift+/ → ？；Shift+, → < ；Shift+. → >
-        if (shiftNow && (vk == 0x31 || vk == 0xBF))
-        {
-            char c = vk == 0x31 ? '！' : '？';
-            if (triggerPunct.Contains(c)) return true;
-        }
-
-        if (!IsTextRelevantKey(vk)) return false;
+        // 问号键 vk=0xBF:Shift+? 或中文模式下'？'
+        if (vk == 0xBF && shiftNow && triggerPunct.IndexOf('?') >= 0) return true;
+        if (vk == 0xBF && !shiftNow && IsImeActive() && triggerPunct.IndexOf('？') >= 0) return true;
 
         // ToUnicodeEx 兜底：翻译按键，看打出的字符是否在触发符号里
         try
@@ -294,7 +301,7 @@ public sealed class HookEngine : IDisposable
                 return false;
             }
 
-            if (!PlausibleMessage(text, endsWithPunct))
+            if (!PlausibleMessage(text, endsWithPunct, realtime))
             {
                 Log?.Invoke("检查: 文本不像聊天消息(无中文、无句末标点、含盘符路径),跳过");
                 Cleanup(usedClipboard, needDeselect, originalClip);
@@ -329,9 +336,32 @@ public sealed class HookEngine : IDisposable
                 // 始终 Ctrl+A+V 全选替换,保证在网页输入框(全选可能不保持)里也能替换成功
                 ClipboardEngine.WriteBackToActive(target);
             }
+            
+            // 写回后验证:检查是否真的写入成功
+            Thread.Sleep(80); // 等待写入完成
+            string? verifyText = null;
+            if (!skipUia)
+            {
+                verifyText = UiaHelper.ReadFocusedText();
+            }
+            if (verifyText == null && usedClipboard)
+            {
+                // UIA读不到,用剪贴板快照验证
+                verifyText = ClipboardEngine.SnapshotActiveText();
+                needDeselect = true; // 剪贴板快照会全选
+            }
+            
+            if (verifyText != null && verifyText.Trim() != target.Trim())
+            {
+                Log?.Invoke($"写回验证失败:期望=[{target.Trim()}] 实际=[{verifyText.Trim()}],可能写入被拒绝");
+                // 写入失败,不更新_lastSet,下次重试
+                Cleanup(usedClipboard, needDeselect, originalClip);
+                return false;
+            }
+            
             _lastSet = target;
             _lastWriteTime = Environment.TickCount64;
-            Thread.Sleep(120);
+            Thread.Sleep(40);
             if (usedClipboard) RestoreClipboard(originalClip);
             return false;
         }
@@ -355,17 +385,29 @@ public sealed class HookEngine : IDisposable
         RestoreClipboard(originalClip);
     }
 
-    /// <summary>文本是否像一条聊天消息:含中文、或以句末标点结尾。挡掉文件路径/网页误选中。</summary>
-    private static bool PlausibleMessage(string text, bool endsWithPunct)
+    /// <summary>文本是否像一条聊天消息:含中文、或以句末标点结尾、或含常见聊天词汇。挡掉文件路径/网页误选中。</summary>
+    private static bool PlausibleMessage(string text, bool endsWithPunct, bool realtime)
     {
         if (endsWithPunct) return true;
         if (text.Contains(":\\", StringComparison.OrdinalIgnoreCase)) return false; // C:\ 盘符路径
+        
+        // 检查是否包含中文字符
         foreach (char c in text)
         {
             // CJK 统一表意文字 / 扩展A / 兼容表意文字
             if ((c >= '\u4E00' && c <= '\u9FFF') || (c >= '\u3400' && c <= '\u4DBF') || (c >= '\uF900' && c <= '\uFAFF'))
                 return true;
         }
+        
+        // 实时模式下,允许纯英文消息(至少包含一个空格,像聊天内容)
+        if (realtime && text.Contains(' ') && text.Length >= 3)
+        {
+            // 排除明显的路径或URL
+            if (text.Contains('/') || text.Contains('\\') || text.Contains("://"))
+                return false;
+            return true;
+        }
+        
         return false;
     }
 
@@ -486,6 +528,7 @@ public sealed class HookEngine : IDisposable
     public void Dispose()
     {
         _debounce.Stop();
+        _uiaCacheReset.Stop();
         _hook.Dispose();
     }
 }
